@@ -12,17 +12,9 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace BackendTemplate.Persistence.Interceptors;
 
-public sealed class AuditOutboxSaveChangesInterceptor : SaveChangesInterceptor
+public sealed class AuditOutboxSaveChangesInterceptor(Func<string> traceIdAccessor, Func<int?> userIdAccessor)
+    : SaveChangesInterceptor
 {
-    private readonly Func<string> _traceIdAccessor;
-    private readonly Func<int?> _userIdAccessor;
-
-    public AuditOutboxSaveChangesInterceptor(Func<string> traceIdAccessor, Func<int?> userIdAccessor)
-    {
-        _traceIdAccessor = traceIdAccessor;
-        _userIdAccessor = userIdAccessor;
-    }
-
     public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
     {
         EnqueueAuditOutbox(eventData.Context);
@@ -43,8 +35,8 @@ public sealed class AuditOutboxSaveChangesInterceptor : SaveChangesInterceptor
         if (dbContext is null) return;
 
         var now = DateTime.UtcNow;
-        var traceId = _traceIdAccessor();
-        var userId = _userIdAccessor();
+        var traceId = traceIdAccessor();
+        var userId = userIdAccessor();
 
         var entries = dbContext.ChangeTracker
             .Entries()
