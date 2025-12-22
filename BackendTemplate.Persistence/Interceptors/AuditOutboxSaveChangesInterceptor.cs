@@ -59,16 +59,16 @@ public sealed class AuditOutboxSaveChangesInterceptor(Func<string> traceIdAccess
             var entityType = entry.Metadata.ClrType.Name;
             var entityId = ResolvePrimaryKey(entry);
 
+            var changedProperties = entry.State == EntityState.Modified
+                ? entry.Properties.Where(p => p.IsModified).Select(p => p.Metadata.Name).ToList()
+                : null;
+
             var oldValues = entry.State is EntityState.Modified or EntityState.Deleted
-                ? ReadValues(entry, current: false)
+                ? ReadValues(entry, current: false, onlyProperties: changedProperties)
                 : null;
 
             var newValues = entry.State is EntityState.Added or EntityState.Modified
-                ? ReadValues(entry, current: true)
-                : null;
-
-            var changedProperties = entry.State == EntityState.Modified
-                ? entry.Properties.Where(p => p.IsModified).Select(p => p.Metadata.Name).ToList()
+                ? ReadValues(entry, current: true, onlyProperties: changedProperties)
                 : null;
 
             var outboxId = Guid.NewGuid();
@@ -102,11 +102,24 @@ public sealed class AuditOutboxSaveChangesInterceptor(Func<string> traceIdAccess
     }
 
     private static Dictionary<string, object?> ReadValues(EntityEntry entry, bool current)
+        => ReadValues(entry, current, onlyProperties: null);
+
+    private static Dictionary<string, object?> ReadValues(
+        EntityEntry entry,
+        bool current,
+        IReadOnlyCollection<string>? onlyProperties)
     {
         var dict = new Dictionary<string, object?>();
 
+        HashSet<string>? allowed = null;
+        if (onlyProperties is { Count: > 0 })
+            allowed = onlyProperties.ToHashSet(StringComparer.Ordinal);
+
         foreach (var prop in entry.Properties)
         {
+            if (allowed is not null && !allowed.Contains(prop.Metadata.Name))
+                continue;
+
             if (prop.Metadata.IsShadowProperty())
                 continue;
 
