@@ -2,11 +2,43 @@ using BackendTemplate.Api.Services;
 using BackendTemplate.Domain.Sample;
 using BackendTemplate.Persistence.DbContexts;
 using BackendTemplate.Persistence.Interceptors;
+using Elastic.Ingest.Elasticsearch;
+using Elastic.Serilog.Sinks;
 using Hangfire;
 using Hangfire.PostgreSql;
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.EntityFrameworkCore;
+using Serilog;
+using Serilog.Context;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseSerilog((ctx, services, cfg) =>
+{
+    cfg
+        .ReadFrom.Configuration(ctx.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext();
+
+    if (ctx.Configuration.GetValue<bool>("ElasticLogging:Enabled"))
+    {
+        var nodes = ctx.Configuration.GetSection("ElasticLogging:Nodes").Get<string[]>()
+            ?? Array.Empty<string>();
+
+        var uris = nodes
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => new Uri(s))
+            .ToArray();
+
+        if (uris.Length > 0)
+        {
+            cfg.WriteTo.Elasticsearch(uris, opts =>
+            {
+                opts.BootstrapMethod = BootstrapMethod.Silent;
+            });
+        }
+    }
+});
 
 // Add services to the container.
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
@@ -49,6 +81,44 @@ builder.Services.AddHangfireServer();
 builder.Services.AddScoped<AuditOutboxProcessor>();
 
 var app = builder.Build();
+
+app.UseSerilogRequestLogging(options =>
+{
+    options.EnrichDiagnosticContext = (diagnosticContext, httpContext) =>
+    {
+        diagnosticContext.Set("TraceId", httpContext.TraceIdentifier);
+        diagnosticContext.Set("UserAgent", httpContext.Request.Headers.UserAgent.ToString());
+        diagnosticContext.Set("RemoteIp", httpContext.Connection.RemoteIpAddress?.ToString());
+    };
+});
+
+app.Use(async (ctx, next) =>
+{
+    using (LogContext.PushProperty("TraceId", ctx.TraceIdentifier))
+    {
+        await next();
+    }
+});
+
+app.UseExceptionHandler(errorApp =>
+{
+    errorApp.Run(async context =>
+    {
+        var traceId = context.TraceIdentifier;
+        var feature = context.Features.Get<IExceptionHandlerFeature>();
+        var exception = feature?.Error;
+
+        Log.Error(exception, "Unhandled exception. TraceId={TraceId}", traceId);
+
+        var problem = Results.Problem(
+            title: "Unexpected error",
+            detail: app.Environment.IsDevelopment() ? exception?.Message : null,
+            statusCode: StatusCodes.Status500InternalServerError,
+            extensions: new Dictionary<string, object?> { ["traceId"] = traceId });
+
+        await problem.ExecuteAsync(context);
+    });
+});
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
